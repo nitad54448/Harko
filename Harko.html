@@ -2831,6 +2831,18 @@ function parsePeakFile(text) {
                             if (!data.spaceGroup) data.spaceGroup = { number: 0, name: val };
                             else data.spaceGroup.name = val;
                         }
+                        // SEVERAL SPACE-GROUP NUMBERS COVER MORE THAN ONE SETTING.
+                        // The IT number does not say which; the H-M name does,
+                        // but only if this program's own database spells that
+                        // setting's symbol exactly the way the file does. The
+                        // Hall symbol names one specific set of generators, so
+                        // matching on it (see the file-load handler) cannot
+                        // land on the wrong setting the way a symbol-string
+                        // comparison can.
+                        else if (key === '_space_group_name_hall' || key === '_symmetry_space_group_name_hall') {
+                            if (!data.spaceGroup) data.spaceGroup = { number: 0, name: '', hall: val };
+                            else data.spaceGroup.hall = val;
+                        }
                         else if (key === '_diffrn_radiation_wavelength') data.wavelength = parseFloat(val);
                     }
                 }
@@ -2939,6 +2951,18 @@ function parsePeakFile(text) {
                             if (!data.spaceGroup) data.spaceGroup = { number: 0, name: val };
                             else data.spaceGroup.name = val;
                         }
+                        // SEVERAL SPACE-GROUP NUMBERS COVER MORE THAN ONE SETTING.
+                        // The IT number does not say which; the H-M name does,
+                        // but only if this program's own database spells that
+                        // setting's symbol exactly the way the file does. The
+                        // Hall symbol names one specific set of generators, so
+                        // matching on it (see the file-load handler) cannot
+                        // land on the wrong setting the way a symbol-string
+                        // comparison can.
+                        else if (key === '_space_group_name_hall' || key === '_symmetry_space_group_name_hall') {
+                            if (!data.spaceGroup) data.spaceGroup = { number: 0, name: '', hall: val };
+                            else data.spaceGroup.hall = val;
+                        }
                         else if (key === '_diffrn_radiation_wavelength') data.wavelength = parseFloat(val);
                     }
                 }
@@ -2973,7 +2997,22 @@ function parsePeakFile(text) {
                 if (!data.spaceGroup) {
                     const sgMatch = line.match(spaceGroupRegex);
                     if (sgMatch) {
-                        data.spaceGroup = { number: parseInt(sgMatch[1]), name: sgMatch[2] ? sgMatch[2].trim() : '' };
+                        // "Space Group:  14 - P121/a1 (setting: b3)" -- captures
+                        // everything after the dash, "(setting: b3)" included.
+                        // That whole string used to be stored as the symbol,
+                        // which can never match a database entry's plain
+                        // symbol with the annotation still attached. Split it
+                        // off and keep it: "b3" is what distinguishes this
+                        // setting from the others sharing the same IT number,
+                        // and is used as a second match key below.
+                        let rawName = sgMatch[2] ? sgMatch[2].trim() : '';
+                        let settingHint = null;
+                        const paren = rawName.match(/\(([^)]*)\)\s*$/);
+                        if (paren) {
+                            settingHint = paren[1].trim();
+                            rawName = rawName.slice(0, paren.index).trim();
+                        }
+                        data.spaceGroup = { number: parseInt(sgMatch[1]), name: rawName, settingHint };
                         continue;
                     }
                 }
@@ -4222,6 +4261,12 @@ function exportGRD() {
             if (d.spaceGroup) {
                 L.push(`_space_group_IT_number        ${q(d.spaceGroup.number)}`);
                 L.push(`_space_group_name_H-M_alt     ${q(state.expansionSymmetry?.settingSymbol || d.spaceGroup.name)}`);
+                // Disambiguates the setting the way the number and the H-M
+                // string alone cannot. Only written when currentSG is
+                // actually the setting this file's number came from.
+                if (currentSG && currentSG.hall && currentSG.number === d.spaceGroup.number) {
+                    L.push(`_space_group_name_Hall        ${q(currentSG.hall)}`);
+                }
             }
             L.push('');
             L.push(`_sharko_map_grid              ${state.mapResolution}`);
@@ -4939,8 +4984,58 @@ let currentSG = null; // Will hold the selected Space Group from UI
                          const sgNum = parsedData.spaceGroup.number;
                          const settings = SG_ENGINE.listSettings(sgNum);
                          if (settings && settings.length > 0) {
-                             const parsedName = parsedData.spaceGroup.name.replace(/\s+/g, '').toUpperCase();
-                             currentSG = settings.find(s => (s.symbol || '').replace(/\s+/g, '').toUpperCase() === parsedName) || settings[0];
+                             const wantHall = (parsedData.spaceGroup.hall || '').replace(/\s+/g, '').toUpperCase();
+                             const parsedName = (parsedData.spaceGroup.name || '').replace(/\s+/g, '').toUpperCase();
+                             // Hall symbol first: it names one specific set of
+                             // generators, so it cannot land on the wrong
+                             // setting the way comparing H-M strings can.
+                             let match = wantHall
+                                 ? settings.find(s => (s.hall || '').replace(/\s+/g, '').toUpperCase() === wantHall)
+                                 : null;
+                             if (!match && parsedName) {
+                                 match = settings.find(s => (s.symbol || '').replace(/\s+/g, '').toUpperCase() === parsedName);
+                             }
+                             // A Pawley report (plain text, no Hall symbol) can
+                             // still name the setting explicitly, e.g.
+                             // "(setting: b3)" -- captured above as settingHint.
+                             // Accepted only when it identifies a single
+                             // candidate; a token matching two settings has not
+                             // actually disambiguated anything.
+                             if (!match && parsedData.spaceGroup.settingHint) {
+                                 const settingToken = (s) => {
+                                     const m = String(s || '').match(/\b([abc][123])\b/i);
+                                     return m ? m[1].toLowerCase() : null;
+                                 };
+                                 const wantToken = settingToken(parsedData.spaceGroup.settingHint);
+                                 if (wantToken) {
+                                     const candidates = settings.filter(s =>
+                                         settingToken(s.setting_description) === wantToken ||
+                                         settingToken(s.display_label) === wantToken);
+                                     if (candidates.length === 1) match = candidates[0];
+                                 }
+                             }
+                             if (match) {
+                                 currentSG = match;
+                             } else {
+                                 // NEITHER MATCHED. Falling back to settings[0]
+                                 // used to do this silently -- for a number
+                                 // with several settings (#14 among them) that
+                                 // is very often the wrong one, and nothing
+                                 // said so until a much later symmetry-expansion
+                                 // warning.
+                                 currentSG = settings[0];
+                                 const label = parsedData.spaceGroup.hall || parsedData.spaceGroup.name || '(unnamed)';
+                                 const hintPart = parsedData.spaceGroup.settingHint
+                                     ? ` (setting hint "${parsedData.spaceGroup.settingHint}" did not match a unique setting either)` : '';
+                                 const msg = `Space group #${sgNum}: could not match "${label}"${hintPart} to any of ` +
+                                     `${settings.length} known setting(s) for this number; defaulted to ` +
+                                     `"${currentSG.symbol}"${settings.length > 1 ? ' -- this may be the WRONG setting' : ''}. ` +
+                                     `Check via the Space Group button before trusting the map.`;
+                                 console.warn('[symmetry] ' + msg);
+                                 statusMessage.textContent = msg;
+                                 statusMessage.classList.remove('is-success');
+                                 statusMessage.classList.add('is-warn');
+                             }
                              updateSpaceGroupInfo();
                              updateLatticeParamUI();
                          }
