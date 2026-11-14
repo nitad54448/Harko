@@ -267,11 +267,18 @@ function analyzeHarkerPeaks(foundPeaks, crystalData, spaceGroups, mapResolution)
     console.log(`[Worker] Analyzing SG: ${sgNumber}. Tol: ${tol.toFixed(3)}`);
     
     sections.forEach((section, si) => {
-        if (!section.coordinate || !['u', 'v', 'w'].includes(section.coordinate) || typeof section.value !== 'number' || !section.solver) { console.warn(`[Worker] Skip invalid section ${si + 1}`); return; }
+        const constraints = Array.isArray(section.constraints) && section.constraints.length
+            ? section.constraints
+            : (section.coordinate ? [{ coordinate: section.coordinate, value: section.value }] : []);
+        if (!constraints.length || !constraints.every(c => ['u', 'v', 'w'].includes(c.coordinate) && typeof c.value === 'number') || !section.solver) { console.warn(`[Worker] Skip invalid section ${si + 1}`); return; }
+        const label = constraints.map(c => `${c.coordinate}=${c.value.toFixed(3)}`).join(', ');
         foundPeaks.forEach((peak, pi) => {
-            const pc = peak[section.coordinate]; const diff = Math.abs(pc - section.value); const pDiff = Math.min(diff, 1.0 - diff);
-            if (pDiff < tol) {
-                const site = { source: `${section.type?.charAt(0).toUpperCase() + section.type?.slice(1) || 'Unk'} (${section.coordinate}=${section.value.toFixed(3)})`, peakCoords: `(${peak.u.toFixed(3)}, ${peak.v.toFixed(3)}, ${peak.w.toFixed(3)})`, x: solveCoordinate(section.solver.x, peak), y: solveCoordinate(section.solver.y, peak), z: solveCoordinate(section.solver.z, peak) };
+            const matchesAll = constraints.every(c => {
+                const diff = Math.abs(peak[c.coordinate] - c.value);
+                return Math.min(diff, 1.0 - diff) < tol;
+            });
+            if (matchesAll) {
+                const site = { source: `${section.type?.charAt(0).toUpperCase() + section.type?.slice(1) || 'Unk'} (${label})`, peakCoords: `(${peak.u.toFixed(3)}, ${peak.v.toFixed(3)}, ${peak.w.toFixed(3)})`, x: solveCoordinate(section.solver.x, peak), y: solveCoordinate(section.solver.y, peak), z: solveCoordinate(section.solver.z, peak) };
                 if (site.x === 'err' || site.y === 'err' || site.z === 'err') { console.error(`[Worker]   Solver error. Peak ${pi}, Sec ${si + 1}. Discarded.`); }
                 else { harkerAnalysisResults.push(site); }
             }
@@ -391,20 +398,21 @@ function combineSites(harkerAnalysisResults, harkerTolerance) {
  * This produces a map in the ABSOLUTE crystallographic frame,
  * avoiding the arbitrary origin-shift of a general Buerger superposition.
  */
-function computeSymmetryMinimumFunction(map, res, symOps) {
+function computeSymmetryMinimumFunction(map, res, symOps, cell) {
     const smfMap = new Float32Array(map.length);
     
-    // Filter out the identity operator
+    // Filter out the identity operator and pure lattice centering translations (r == I)
     const activeOps = symOps.filter(op => {
-        const isId = Math.abs(op.r[0]-1) < 1e-4 && Math.abs(op.r[4]-1) < 1e-4 && Math.abs(op.r[8]-1) < 1e-4 &&
-                     Math.abs(op.r[1]) < 1e-4 && Math.abs(op.r[2]) < 1e-4 && Math.abs(op.r[3]) < 1e-4 && 
-                     Math.abs(op.r[5]) < 1e-4 && Math.abs(op.r[6]) < 1e-4 && Math.abs(op.r[7]) < 1e-4 &&
-                     Math.abs(op.t[0]) < 1e-4 && Math.abs(op.t[1]) < 1e-4 && Math.abs(op.t[2]) < 1e-4;
-        return !isId;
+        const isPureTrans = Math.abs(op.r[0]-1) < 1e-4 && Math.abs(op.r[4]-1) < 1e-4 && Math.abs(op.r[8]-1) < 1e-4 &&
+                            Math.abs(op.r[1]) < 1e-4 && Math.abs(op.r[2]) < 1e-4 && Math.abs(op.r[3]) < 1e-4 && 
+                            Math.abs(op.r[5]) < 1e-4 && Math.abs(op.r[6]) < 1e-4 && Math.abs(op.r[7]) < 1e-4;
+        return !isPureTrans;
     });
 
-    // Fallback if P1 or no operators exist
+    // Fallback if P1 or only pure translations exist
     if (activeOps.length === 0) return null; 
+
+    const originMask = cell ? buildOriginMask(res, cell) : null;
 
     for (let w = 0; w < res; w++) {
         for (let v = 0; v < res; v++) {
@@ -413,6 +421,7 @@ function computeSymmetryMinimumFunction(map, res, symOps) {
                 const y = v / res;
                 const z = w / res;
                 let minVal = Infinity;
+                let validCount = 0;
                 
                 for (let i = 0; i < activeOps.length; i++) {
                     const op = activeOps[i];
@@ -429,10 +438,13 @@ function computeSymmetryMinimumFunction(map, res, symOps) {
                     const iv = Math.round((((dy % 1) + 1) % 1) * res) % res;
                     const iw = Math.round((((dz % 1) + 1) % 1) * res) % res;
                     
-                    const val = map[iw * res * res + iv * res + iu];
+                    const idx = iw * res * res + iv * res + iu;
+                    if (originMask && originMask[idx]) continue;
+                    const val = map[idx];
                     if (val < minVal) minVal = val;
+                    validCount++;
                 }
-                smfMap[w * res * res + v * res + u] = minVal;
+                smfMap[w * res * res + v * res + u] = validCount > 0 ? minVal : 0;
             }
         }
     }
@@ -486,7 +498,7 @@ function runAnalysisSteps(pattersonMap3D, crystalData, spaceGroups, mapResolutio
     
     if (symOps && symOps.length > 1) {
         console.log(`[Worker] Computing Symmetry Minimum Function (SMF) for absolute coordinates...`);
-        superMap = computeSymmetryMinimumFunction(pattersonMap3D, mapResolution, symOps);
+        superMap = computeSymmetryMinimumFunction(pattersonMap3D, mapResolution, symOps, crystalData?.cell);
     }
 
     // 2. If P1 or no symOps available, fall back to standard Buerger Superposition

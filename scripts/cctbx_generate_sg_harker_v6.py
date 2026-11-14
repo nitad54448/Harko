@@ -307,7 +307,7 @@ def get_harker_geometry(sg_info):
 
         # Identify zero rows (which define the Harker planes/lines)
         zero_rows = [idx for idx in range(3) if all(abs(val) < 1e-5 for val in r_minus_i[idx])]
-        if not zero_rows:
+        if not zero_rows or len(zero_rows) == 3:
             continue
 
         # Identify the submatrix to invert
@@ -352,16 +352,32 @@ def get_harker_geometry(sg_info):
                         solver[vars_str[col_name]] = " + ".join(terms).replace("+ -", "- ")
 
         sec_type = "plane" if len(zero_rows) == 1 else "line"
+        constraints = [
+            {
+                "coordinate": coords[z_idx],
+                "value": round(t[z_idx], 6) % 1.0
+            }
+            for z_idx in zero_rows
+        ]
+        key = (sec_type, tuple((c["coordinate"], round(c["value"], 5)) for c in constraints))
+        resolved_count = sum(1 for k in ("x", "y", "z") if solver.get(k, "?") != "?")
+        existing = next((s for s in sections if s.get("_key") == key), None)
+        if existing is None:
+            sections.append({
+                "_key": key,
+                "type": sec_type,
+                "coordinate": constraints[0]["coordinate"],
+                "value": constraints[0]["value"],
+                "constraints": constraints,
+                "solver": solver
+            })
+        else:
+            prev_count = sum(1 for k in ("x", "y", "z") if existing["solver"].get(k, "?") != "?")
+            if resolved_count > prev_count:
+                existing["solver"] = solver
 
-        for z_idx in zero_rows:
-            val = t[z_idx] % 1.0
-            if not any(s['coordinate'] == coords[z_idx] and abs(s['value'] - val) < 1e-5 for s in sections):
-                sections.append({
-                    "type": sec_type,
-                    "coordinate": coords[z_idx],
-                    "value": val,
-                    "solver": solver
-                })
+    for s in sections:
+        s.pop("_key", None)
 
     return sections
 

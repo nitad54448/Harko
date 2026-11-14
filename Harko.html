@@ -22,7 +22,7 @@
 
 <body>
 <div id="top-right-controls" style="position: fixed; top: 1rem; right: 1rem; z-index: 9999; display: flex; align-items: center; background: var(--bg-elevated); border: 1px solid var(--rule); border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
-    <button id="info-btn" title="swarm-Harko, 08 aug 2026" aria-label="Info" style="position: static; margin: 0; width: 28px; height: 28px; border: none; border-right: 1px solid var(--rule); border-radius: 6px 0 0 6px; background: transparent; padding: 0; display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--fg);">
+    <button id="info-btn" title="swarm-Harko, 14 nov 2026" aria-label="Info" style="position: static; margin: 0; width: 28px; height: 28px; border: none; border-right: 1px solid var(--rule); border-radius: 6px 0 0 6px; background: transparent; padding: 0; display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--fg);">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" style="width: 20px; height: 20px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
     </button>
     <button id="theme-toggle" title="Toggle light / dark theme" aria-label="Toggle theme" style="position: static; margin: 0; width: 28px; height: 28px; border: none; border-right: 1px solid var(--rule); border-radius: 0; background: transparent; padding: 0; display: flex; align-items: center; justify-content: center; cursor: pointer;">
@@ -4009,9 +4009,24 @@ function updateCrystalInfo() {
          * minimum-image convention, so contacts across cell boundaries and
          * between an atom and its own symmetry mates are included.
          */
+        function getActiveSwarmModel() {
+            if (!state.swarmBest) return null;
+            if (Array.isArray(state.swarmSites) && state.swarmSites.length === state.swarmBest.zArray.length) {
+                const coords = new Float32Array(state.swarmSites.length * 3);
+                for (let i = 0; i < state.swarmSites.length; i++) {
+                    coords[i * 3] = state.swarmSites[i].x;
+                    coords[i * 3 + 1] = state.swarmSites[i].y;
+                    coords[i * 3 + 2] = state.swarmSites[i].z;
+                }
+                return { ...state.swarmBest, coords };
+            }
+            return state.swarmBest;
+        }
+
         function reportContacts() {
-            if (!state.swarmBest || !state.crystalData?.cell) { contactReport.textContent = ''; return; }
-            const { coords, zArray, symOps } = state.swarmBest;
+            const best = getActiveSwarmModel();
+            if (!best || !state.crystalData?.cell) { contactReport.textContent = ''; return; }
+            const { coords, zArray, symOps } = best;
             const orth = sharkoOrthMatrix(state.crystalData.cell);
             const fixed = parseFloat(minContactInput.value) || 0;
 
@@ -4855,7 +4870,12 @@ function getUI_Cell() {
             
             
             state.crystalData.cell = cell;
-            state.crystalData.spaceGroup = { number: currentSG.number, name: currentSG.symbol };
+            state.crystalData.spaceGroup = {
+                number: currentSG.number,
+                name: currentSG.symbol,
+                hall: currentSG.hall,
+                description: currentSG.description
+            };
             updateCrystalInfo();
 
             console.log("=== Starting Full Analysis ===");
@@ -5163,9 +5183,10 @@ let currentSG = null; // Will hold the selected Space Group from UI
          * nothing to smear.
          */
         function refreshCalculatedMap() {
-            if (!state.swarmBest) return;
-            state.calculatedMap3D = buildCalcMap(state.swarmBest.coords, state.swarmBest.zArray,
-                                                 state.swarmBest.symOps, state.mapResolution, effectiveSigma());
+            const best = getActiveSwarmModel();
+            if (!best) return;
+            state.calculatedMap3D = buildCalcMap(best.coords, best.zArray,
+                                                 best.symOps, state.mapResolution, effectiveSigma());
             drawPattersonSlice();
         }
 
@@ -5207,7 +5228,7 @@ let currentSG = null; // Will hold the selected Space Group from UI
          */
         function fitTemperatureFactor() {
             const obs = state.pattersonMap3D;
-            const best = state.swarmBest;
+            const best = getActiveSwarmModel();
             if (!obs || !best || !state.crystalData?.cell) return null;
 
             const res = state.mapResolution;
